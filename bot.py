@@ -1,8 +1,7 @@
-
 import os
 import re
 import asyncio
-import requests
+from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,171 +11,160 @@ from telegram.ext import (
     filters,
 )
 
-# Environment Variables
 TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-PUBLIC_CHANNEL_ID = os.environ.get("CHAT_ID")
-LAMIX_API_URL = os.environ.get("LAMIX_API_URL")
-LAMIX_TOKEN = os.environ.get("LAMIX_TOKEN")
+
+# Global Tracking State
+active_targets = {}
 
 def log(text):
     print(text, flush=True)
 
-# টেক্সট থেকে অনেকগুলো নাম্বার বা রেঞ্জ ফিল্টার করে লিস্ট বানানো
-function_numbers_cache = []
+def extract_numbers(text):
+    if text.startswith("/"):
+        text = text.split(" ", 1)[-1] if " " in text else ""
+    return re.findall(r"\+?\d{8,15}", text)
 
-def extract_numbers_from_text(raw_text):
-    if raw_text.startswith("/"):
-        raw_text = raw_text.split(" ", 1)[-1] if " " in raw_text else ""
-    
-    # সব ধরনের ফোন নম্বর বা রেঞ্জ প্যাটার্ন খুঁজে বের করা
-    found_nums = re.findall(r"\+?\d{6,15}", raw_text)
-    return found_nums
-
-# প্যানেল থেকে নির্দিষ্ট নাম্বার নিয়ে অর্ডার তৈরি করা
-def get_number_by_specific_range(service_name, target_range):
-    params = {
-        "action": "getNumber",
-        "token": LAMIX_TOKEN,
-        "service": service_name,
-        "range": target_range,
-    }
+# Playwright Browser Automation for HK Ticketing
+async def send_hkticketing_otp(number):
     try:
-        res = requests.get(LAMIX_API_URL, params=params, timeout=10).json()
-        if res.get("status") == "success":
-            return res.get("id"), res.get("number")
-    except Exception as e:
-        log(f"Get Number Error: {e}")
-    return None, None
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
 
-# OTP চেক করা
-def check_otp(order_id):
-    params = {"action": "getStatus", "token": LAMIX_TOKEN, "id": order_id}
-    try:
-        res = requests.get(LAMIX_API_URL, params=params, timeout=10).json()
-        if res.get("status") == "STATUS_OK":
-            return res.get("sms")
-    except Exception as e:
-        log(f"Check OTP Error: {e}")
-    return None
+            log(f"🌐 Hitting HK Ticketing for: {number}")
+            await page.goto("https://www.hkticketing.com/", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
 
-# অর্ডার ক্যানসেল করা
-def cancel_order(order_id):
-    params = {
-        "action": "setStatus",
-        "token": LAMIX_TOKEN,
-        "id": order_id,
-        "status": "8",
-    }
-    try:
-        requests.get(LAMIX_API_URL, params=params, timeout=10)
-    except Exception as e:
-        log(f"Cancel Error: {e}")
-
-# মূল অটোমেশন লুপ (HK Ticketing এর জন্য)
-async def hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, number_list: list):
-    service_name = "hkticketing"
-    
-    # বিকল্প রেঞ্জ বা দেশ (যেমন: 60 কোড এবং Israel)
-    fallback_ranges = ["60", "Israel", "972"] 
-    
-    index = 0
-    while True:
-        if not number_list:
-            break
+            clean_num = number.replace("+", "")
             
-        current_target = number_list[index % len(number_list)]
-        index += 1
+            phone_input = await page.query_selector('input[type="tel"], input[name*="phone"], input[id*="mobile"]')
+            if phone_input:
+                await phone_input.fill(clean_num)
+                await page.wait_for_timeout(1000)
+
+                submit_btn = await page.query_selector('button:has-text("OTP"), button:has-text("Send"), input[type="submit"]')
+                if submit_btn:
+                    await submit_btn.click()
+                    await page.wait_for_timeout(2000)
+                    await browser.close()
+                    return True
+
+            await browser.close()
+            return False
+
+    except Exception as e:
+        log(f"❌ Error hitting {number}: {e}")
+        return False
+
+# OTP Tracking and Loop Execution
+async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, numbers: list):
+    for number in numbers:
+        clean_num = number.replace("+", "")
+        active_targets[clean_num] = {"chat_id": chat_id, "otp_found": False, "last_otp": None}
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🔄 *HK Ticketing:* Trying with Target/Range: `{current_target}`",
-            parse_mode="Markdown",
+            text=f"🚀 *Trying HK Ticketing:* `{number}`\n⏳ Watching Feed Channel for OTP...",
+            parse_mode="Markdown"
         )
 
-        order_id, number = get_number_by_specific_range(service_name, str(current_target))
+        hit_success = await send_hkticketing_otp(number)
         
-        if not order_id or not number:
-            # যদি সরাসরি নাম্বারে না পায়, তবে অল্টারনেটিভ রেঞ্জ দিয়ে ট্রাই করবে
-            for alt in fallback_ranges:
-                order_id, number = get_number_by_specific_range(service_name, alt)
-                if order_id and number:
-                    break
-        
-        if not order_id or not number:
+        if not hit_success:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ Stock unavailable for `{current_target}`. Retrying next...",
+                text=f"❌ Request failed for `{number}`. Moving to next...",
+                parse_mode="Markdown"
             )
-            await asyncio.sleep(3)
+            del active_targets[clean_num]
             continue
 
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"📱 *Testing Number:* `{number}`\n⏳ Waiting for OTP (1 min timeout)...",
-            parse_mode="Markdown",
-        )
-
-        otp_received = None
-        # ১ মিনিট অপেক্ষা করার লুপ (১২ বার x ৫ সেকেন্ড = ৬০ সেকেন্ড)
-        for _ in range(12):
+        for _ in range(10):
             await asyncio.sleep(5)
-            otp = check_otp(order_id)
-            if otp:
-                otp_received = otp
+            if active_targets[clean_num]["otp_found"]:
                 break
 
-        if otp_received:
-            success_msg = (
-                f"🚨 *HK TICKETING OTP SUCCESS!* 🚨\n\n"
-                f"📱 *Number:* `{number}`\n"
-                f"💬 *OTP Code:* `{otp_received}`\n\n"
-                f"🔥 *এই নাম্বারে বারবার হিট করা হচ্ছে!*"
-            )
-            if PUBLIC_CHANNEL_ID:
-                await context.bot.send_message(
-                    chat_id=PUBLIC_CHANNEL_ID,
-                    text=success_msg,
-                    parse_mode="Markdown",
-                )
+        if active_targets[clean_num]["otp_found"]:
+            otp_code = active_targets[clean_num]["last_otp"]
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=success_msg,
-                parse_mode="Markdown",
+                text=f"🔥 *OTP MATCHED & LIVE!* 🔥\n📱 Number: `{number}`\n💬 Code: `{otp_code}`\n\n♻️ *এই নাম্বারে ১ মিনিট পর পর অটো-হিট চালু থাকবে...*",
+                parse_mode="Markdown"
             )
-            
-            # যেটাতে ওটিপি আসবে, ১ মিনিট পর পর ওই একই নাম্বারে বারবার ট্রাই চালিয়ে যাওয়ার লুপ
+
+            # Re-hitting loop for live numbers
             while True:
                 await asyncio.sleep(60)
-                await context.bot.send_message(chat_id=chat_id, text=f"♻️ Re-testing successful number: `{number}` after 1 min...")
-                # এখানে দরকার হলে একই অর্ডারের জন্য পুনরায় স্ট্যাটাস বা রিকুয়েস্ট পাঠানো যাবে
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚡ *Re-hitting Live Number:* `{number}`",
+                    parse_mode="Markdown"
+                )
+                await send_hkticketing_otp(number)
         else:
-            cancel_order(order_id)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ No OTP on `{number}`. Switching to next number...",
+                text=f"⏱️ No OTP in feed for `{number}` within limit. Moving to next...",
+                parse_mode="Markdown"
             )
-        
-        await asyncio.sleep(2)
+            del active_targets[clean_num]
 
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Feed Channel Listener
+async def handle_channel_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message_text = ""
+    if update.channel_post:
+        message_text = update.channel_post.text or ""
+    elif update.message:
+        message_text = update.message.text or ""
+
+    if not message_text:
+        return
+
+    found_numbers = re.findall(r"\+?\d{8,15}", message_text)
+    
+    for num in found_numbers:
+        clean_num = num.replace("+", "")
+        if clean_num in active_targets:
+            otp_match = re.search(r"\b\d{4,6}\b", message_text)
+            otp_code = otp_match.group(0) if otp_match else "OTP Received"
+
+            active_targets[clean_num]["otp_found"] = True
+            active_targets[clean_num]["last_otp"] = otp_code
+            log(f"✅ OTP Feed Match Found for {clean_num}: {otp_code}")
+
+# User Inbox Handler
+async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.channel_post:
+        return
+
     text = update.message.text.strip()
-    numbers = extract_numbers_from_text(text)
+    numbers = extract_numbers(text)
 
     if not numbers:
-        await update.message.reply_text("⚠️ কোনো সঠিক নাম্বার বা রেঞ্জ লিস্ট পাওয়া যায়নি। একসাথে অনেকগুলো নাম্বার পেস্ট করুন।")
+        await update.message.reply_text("⚠️ কোনো নাম্বার পাওয়া যায়নি! Country code সহ (+972... / +60...) নাম্বার পেস্ট করুন।")
         return
 
     await update.message.reply_text(
-        f"🚀 মোট `{len(numbers)}` টি নাম্বার বা রেঞ্জ লোড করা হয়েছে। HK Ticketing-এ অটো-হিট শুরু হলো...",
-        parse_mode="Markdown",
+        f"📥 মোট `{len(numbers)}` টি নাম্বার লোড করা হয়েছে। HK Ticketing-এ হিট এবং Feed Check শুরু হচ্ছে...",
+        parse_mode="Markdown"
     )
 
-    asyncio.create_task(hkticketing_loop(context, update.message.chat_id, numbers))
+    asyncio.create_task(start_hkticketing_loop(context, update.message.chat_id, numbers))
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-    log("HK Ticketing Auto-Hit Bot is Running...")
+    
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_feed))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_messages))
+    app.add_handler(CommandHandler("start", handle_user_messages))
+
+    log("HK Ticketing Auto-Hit Bot Running...")
     app.run_polling()
 
 if __name__ == "__main__":
