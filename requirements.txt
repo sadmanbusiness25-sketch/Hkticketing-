@@ -1,4 +1,3 @@
 python-telegram-bot
 playwright==1.62.0
-playwright-stealth
 
