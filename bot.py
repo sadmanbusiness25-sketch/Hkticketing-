@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
+from twocaptcha import TwoCaptcha
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,8 +14,9 @@ from telegram.ext import (
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+CAPTCHA_API_KEY = os.environ.get("CAPTCHA_KEY")
 
-# Global Tracking State
+solver = TwoCaptcha(CAPTCHA_API_KEY) if CAPTCHA_API_KEY else None
 active_targets = {}
 
 def log(text):
@@ -24,34 +27,67 @@ def extract_numbers(text):
         text = text.split(" ", 1)[-1] if " " in text else ""
     return re.findall(r"\+?\d{8,15}", text)
 
-# Playwright Browser Automation for HK Ticketing
+# CAPTCHA সলভ করার হেলপার ফাংশন
+async def solve_recaptcha(site_url, site_key):
+    if not solver:
+        log("⚠️ CAPTCHA_KEY দেওয়া হয়নি, ক্যাপচা স্কিপ করা হচ্ছে...")
+        return None
+    try:
+        log("🧩 Solving CAPTCHA via 2Captcha API...")
+        result = solver.recaptcha(sitekey=site_key, url=site_url)
+        return result.get('code')
+    except Exception as e:
+        log(f"❌ CAPTCHA Solve Failed: {e}")
+        return None
+
+# Advanced Playwright Engine with Stealth & Captcha Bypass
 async def send_hkticketing_otp(number):
     try:
         async with async_playwright() as p:
+            # Chromedriver bypass flags
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720}
             )
             page = await context.new_page()
+            
+            # Apply Stealth to avoid detection
+            await stealth_async(page)
 
             log(f"🌐 Hitting HK Ticketing for: {number}")
-            await page.goto("https://www.hkticketing.com/", wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2500)
+            await page.goto("https://www.hkticketing.com/", wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(3000)
 
             clean_num = number.replace("+", "")
             
-            phone_input = await page.query_selector('input[type="tel"], input[name*="phone"], input[id*="mobile"]')
+            # ১. ইনপুট বক্স সিলেক্টর (HK Ticketing UI অনুযায়ী)
+            phone_input = await page.query_selector('input[type="tel"], input[name*="mobile"], input[id*="mobile"]')
             if phone_input:
                 await phone_input.fill(clean_num)
                 await page.wait_for_timeout(1000)
 
+                # ২. ক্যাপচা চেক ও সলভ (যদি সাইটে ক্যাপচা থাকে)
+                captcha_element = await page.query_selector('[data-sitekey]')
+                if captcha_element:
+                    site_key = await captcha_element.get_attribute('data-sitekey')
+                    token = await solve_recaptcha("https://www.hkticketing.com/", site_key)
+                    if token:
+                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{token}";')
+                        await page.wait_for_timeout(1000)
+
+                # ৩. সাবমিট/ওটিপি বাটন হিট
                 submit_btn = await page.query_selector('button:has-text("OTP"), button:has-text("Send"), input[type="submit"]')
                 if submit_btn:
                     await submit_btn.click()
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(3000)
                     await browser.close()
                     return True
 
@@ -62,7 +98,6 @@ async def send_hkticketing_otp(number):
         log(f"❌ Error hitting {number}: {e}")
         return False
 
-# OTP Tracking and Loop Execution
 async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, numbers: list):
     for number in numbers:
         clean_num = number.replace("+", "")
@@ -70,7 +105,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🚀 *Trying HK Ticketing:* `{number}`\n⏳ Watching Feed Channel for OTP...",
+            text=f"🚀 *Trying HK Ticketing (Stealth Mode):* `{number}`\n⏳ Watching Feed Channel for OTP...",
             parse_mode="Markdown"
         )
 
@@ -79,13 +114,13 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         if not hit_success:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ Request failed for `{number}`. Moving to next...",
+                text=f"❌ Request failed/blocked for `{number}`. Moving to next...",
                 parse_mode="Markdown"
             )
             del active_targets[clean_num]
             continue
 
-        for _ in range(10):
+        for _ in range(12):
             await asyncio.sleep(5)
             if active_targets[clean_num]["otp_found"]:
                 break
@@ -98,7 +133,6 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 parse_mode="Markdown"
             )
 
-            # Re-hitting loop for live numbers
             while True:
                 await asyncio.sleep(60)
                 await context.bot.send_message(
@@ -115,7 +149,6 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
             )
             del active_targets[clean_num]
 
-# Feed Channel Listener
 async def handle_channel_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = ""
     if update.channel_post:
@@ -138,7 +171,6 @@ async def handle_channel_feed(update: Update, context: ContextTypes.DEFAULT_TYPE
             active_targets[clean_num]["last_otp"] = otp_code
             log(f"✅ OTP Feed Match Found for {clean_num}: {otp_code}")
 
-# User Inbox Handler
 async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.channel_post:
         return
@@ -164,7 +196,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_messages))
     app.add_handler(CommandHandler("start", handle_user_messages))
 
-    log("HK Ticketing Auto-Hit Bot Running...")
+    log("HK Ticketing Auto-Hit Bot (Stealth Engine) Running...")
     app.run_polling()
 
 if __name__ == "__main__":
