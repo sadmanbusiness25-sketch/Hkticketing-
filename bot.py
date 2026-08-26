@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -23,7 +22,7 @@ def extract_numbers(text):
         text = text.split(" ", 1)[-1] if " " in text else ""
     return re.findall(r"\+?\d{8,15}", text)
 
-# ফ্রি এবং স্টেলথ প্লেয়রাইট ইঞ্জিন যা ক্লাউডফ্লেয়ার এড়াতে সাহায্য করবে
+# ব্রাউজার অটোমেশন ও বট ডিটেকশন এড়ানোর নিজস্ব মেথড
 async def send_hkticketing_otp(number):
     try:
         async with async_playwright() as p:
@@ -42,13 +41,13 @@ async def send_hkticketing_otp(number):
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US"
             )
-            page = await context.new_page()
             
-            # Stealth Apply করা যাতে বট ধরা না পড়ে
-            await stealth_async(page)
+            # বট ফ্লাগ রিমুভ করার জন্য স্ক্রিপ্ট ইনজেক্ট করা
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            page = await context.new_page()
 
             log(f"🌐 Hitting HK Ticketing for: {number}")
-            # পেজ লোড করার জন্য একটু বেশি সময় দেওয়া
             await page.goto("https://www.hkticketing.com/", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(4000)
 
@@ -84,7 +83,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🚀 *Trying HK Ticketing (Free Stealth):* `{number}`\n⏳ Watching Feed Channel for OTP...",
+            text=f"🚀 *Trying HK Ticketing:* `{number}`\n⏳ Watching Feed Channel for OTP...",
             parse_mode="Markdown"
         )
 
@@ -108,7 +107,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
             otp_code = active_targets[clean_num]["last_otp"]
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🔥 *OTP MATCHED & LIVE!* 🔥\n📱 Number: `{number}`\n💬 Code: `{otp_code}`\n\n♻️ *এই নাম্বারে ১ মিনিট পর পর ফ্রি অটো-হিট চালু থাকবে...*",
+                text=f"🔥 *OTP MATCHED & LIVE!* 🔥\n📱 Number: `{number}`\n💬 Code: `{otp_code}`\n\n♻️ *এই নাম্বারে ১ মিনিট পর পর অটো-হিট চালু থাকবে...*",
                 parse_mode="Markdown"
             )
 
@@ -162,7 +161,7 @@ async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await update.message.reply_text(
-        f"📥 মোট `{len(numbers)}` টি নাম্বার লোড করা হয়েছে। ফ্রি অটো-হিট ও Feed Check শুরু হচ্ছে...",
+        f"📥 মোট `{len(numbers)}` টি নাম্বার লোড করা হয়েছে। অটো-হিট ও Feed Check শুরু হচ্ছে...",
         parse_mode="Markdown"
     )
 
@@ -175,7 +174,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_messages))
     app.add_handler(CommandHandler("start", handle_user_messages))
 
-    log("HK Ticketing Free Stealth Bot Running...")
+    log("HK Ticketing Clean Stealth Bot Running...")
     app.run_polling()
 
 if __name__ == "__main__":
