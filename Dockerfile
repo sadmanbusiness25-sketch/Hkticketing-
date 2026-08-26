@@ -1,5 +1,8 @@
-FROM python:3.10-slim
+FROM mcr.microsoft.com/playwright/python:v1.40.0-focal
+
 WORKDIR /app
 COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir python-telegram-bot playwright
+
 CMD ["python", "bot.py"]
