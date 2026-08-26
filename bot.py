@@ -3,7 +3,6 @@ import re
 import asyncio
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
-from twocaptcha import TwoCaptcha
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,9 +13,6 @@ from telegram.ext import (
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-CAPTCHA_API_KEY = os.environ.get("CAPTCHA_KEY")
-
-solver = TwoCaptcha(CAPTCHA_API_KEY) if CAPTCHA_API_KEY else None
 active_targets = {}
 
 def log(text):
@@ -27,64 +23,47 @@ def extract_numbers(text):
         text = text.split(" ", 1)[-1] if " " in text else ""
     return re.findall(r"\+?\d{8,15}", text)
 
-# CAPTCHA সলভ করার হেলপার ফাংশন
-async def solve_recaptcha(site_url, site_key):
-    if not solver:
-        log("⚠️ CAPTCHA_KEY দেওয়া হয়নি, ক্যাপচা স্কিপ করা হচ্ছে...")
-        return None
-    try:
-        log("🧩 Solving CAPTCHA via 2Captcha API...")
-        result = solver.recaptcha(sitekey=site_key, url=site_url)
-        return result.get('code')
-    except Exception as e:
-        log(f"❌ CAPTCHA Solve Failed: {e}")
-        return None
-
-# Advanced Playwright Engine with Stealth & Captcha Bypass
+# ফ্রি এবং স্টেলথ প্লেয়রাইট ইঞ্জিন যা ক্লাউডফ্লেয়ার এড়াতে সাহায্য করবে
 async def send_hkticketing_otp(number):
     try:
         async with async_playwright() as p:
-            # Chromedriver bypass flags
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
+                    "--disable-infobars",
+                    "--window-size=1920,1080",
                     "--disable-blink-features=AutomationControlled"
                 ]
             )
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US"
             )
             page = await context.new_page()
             
-            # Apply Stealth to avoid detection
+            # Stealth Apply করা যাতে বট ধরা না পড়ে
             await stealth_async(page)
 
             log(f"🌐 Hitting HK Ticketing for: {number}")
-            await page.goto("https://www.hkticketing.com/", wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(3000)
+            # পেজ লোড করার জন্য একটু বেশি সময় দেওয়া
+            await page.goto("https://www.hkticketing.com/", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(4000)
 
             clean_num = number.replace("+", "")
             
-            # ১. ইনপুট বক্স সিলেক্টর (HK Ticketing UI অনুযায়ী)
-            phone_input = await page.query_selector('input[type="tel"], input[name*="mobile"], input[id*="mobile"]')
+            # ইনপুট ফিল্ড খুঁজে নম্বর বসানো
+            phone_input = await page.query_selector('input[type="tel"], input[name*="phone"], input[id*="mobile"], input.phone-input')
             if phone_input:
+                await phone_input.click()
+                await page.wait_for_timeout(500)
                 await phone_input.fill(clean_num)
                 await page.wait_for_timeout(1000)
 
-                # ২. ক্যাপচা চেক ও সলভ (যদি সাইটে ক্যাপচা থাকে)
-                captcha_element = await page.query_selector('[data-sitekey]')
-                if captcha_element:
-                    site_key = await captcha_element.get_attribute('data-sitekey')
-                    token = await solve_recaptcha("https://www.hkticketing.com/", site_key)
-                    if token:
-                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{token}";')
-                        await page.wait_for_timeout(1000)
-
-                # ৩. সাবমিট/ওটিপি বাটন হিট
-                submit_btn = await page.query_selector('button:has-text("OTP"), button:has-text("Send"), input[type="submit"]')
+                # সাবমিট বা ওটিপি সেন্ড বাটনে ক্লিক
+                submit_btn = await page.query_selector('button:has-text("OTP"), button:has-text("Send"), button[type="submit"], input[type="submit"]')
                 if submit_btn:
                     await submit_btn.click()
                     await page.wait_for_timeout(3000)
@@ -105,7 +84,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🚀 *Trying HK Ticketing (Stealth Mode):* `{number}`\n⏳ Watching Feed Channel for OTP...",
+            text=f"🚀 *Trying HK Ticketing (Free Stealth):* `{number}`\n⏳ Watching Feed Channel for OTP...",
             parse_mode="Markdown"
         )
 
@@ -114,7 +93,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         if not hit_success:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ Request failed/blocked for `{number}`. Moving to next...",
+                text=f"❌ Request failed for `{number}`. Moving to next...",
                 parse_mode="Markdown"
             )
             del active_targets[clean_num]
@@ -129,7 +108,7 @@ async def start_hkticketing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: in
             otp_code = active_targets[clean_num]["last_otp"]
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🔥 *OTP MATCHED & LIVE!* 🔥\n📱 Number: `{number}`\n💬 Code: `{otp_code}`\n\n♻️ *এই নাম্বারে ১ মিনিট পর পর অটো-হিট চালু থাকবে...*",
+                text=f"🔥 *OTP MATCHED & LIVE!* 🔥\n📱 Number: `{number}`\n💬 Code: `{otp_code}`\n\n♻️ *এই নাম্বারে ১ মিনিট পর পর ফ্রি অটো-হিট চালু থাকবে...*",
                 parse_mode="Markdown"
             )
 
@@ -179,11 +158,11 @@ async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     numbers = extract_numbers(text)
 
     if not numbers:
-        await update.message.reply_text("⚠️ কোনো নাম্বার পাওয়া যায়নি! Country code সহ (+972... / +60...) নাম্বার পেস্ট করুন।")
+        await update.message.reply_text("⚠️ কোনো নাম্বার পাওয়া যায়নি! Country code সহ নাম্বার পেস্ট করুন।")
         return
 
     await update.message.reply_text(
-        f"📥 মোট `{len(numbers)}` টি নাম্বার লোড করা হয়েছে। HK Ticketing-এ হিট এবং Feed Check শুরু হচ্ছে...",
+        f"📥 মোট `{len(numbers)}` টি নাম্বার লোড করা হয়েছে। ফ্রি অটো-হিট ও Feed Check শুরু হচ্ছে...",
         parse_mode="Markdown"
     )
 
@@ -196,7 +175,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_messages))
     app.add_handler(CommandHandler("start", handle_user_messages))
 
-    log("HK Ticketing Auto-Hit Bot (Stealth Engine) Running...")
+    log("HK Ticketing Free Stealth Bot Running...")
     app.run_polling()
 
 if __name__ == "__main__":
