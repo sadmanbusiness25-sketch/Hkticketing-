@@ -22,7 +22,7 @@ def extract_numbers(text):
         text = text.split(" ", 1)[-1] if " " in text else ""
     return re.findall(r"\+?\d{8,15}", text)
 
-# ব্রাউজার অটোমেশন ও বট ডিটেকশন এড়ানোর নিজস্ব মেথড
+# উন্নত ব্রাউজার ও সঠিক রেজিস্ট্রেশন লিংক সহ হিট ফাংশন
 async def send_hkticketing_otp(number):
     try:
         async with async_playwright() as p:
@@ -42,33 +42,55 @@ async def send_hkticketing_otp(number):
                 locale="en-US"
             )
             
-            # বট ফ্লাগ রিমুভ করার জন্য স্ক্রিপ্ট ইনজেক্ট করা
             await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
             page = await context.new_page()
 
             log(f"🌐 Hitting HK Ticketing for: {number}")
-            await page.goto("https://www.hkticketing.com/", wait_until="domcontentloaded", timeout=60000)
+            
+            # সরাসরি HK Ticketing এর লগইন বা অ্যাকাউন্ট পেজে যাওয়া (যেখানে ফোন ইনপুট থাকে)
+            await page.goto("https://www.hkticketing.com/account/login", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(4000)
 
             clean_num = number.replace("+", "")
             
-            # ইনপুট ফিল্ড খুঁজে নম্বর বসানো
-            phone_input = await page.query_selector('input[type="tel"], input[name*="phone"], input[id*="mobile"], input.phone-input')
+            # একাধিক সম্ভাব্য ইনপুট সিলেক্টর চেক করা
+            phone_input = None
+            selectors = ['input[type="tel"]', 'input[name*="phone"]', 'input[id*="mobile"]', 'input[name*="mobile"]', 'input.phone-input', 'input[placeholder*="Mobile"]']
+            
+            for sel in selectors:
+                try:
+                    phone_input = await page.query_selector(sel)
+                    if phone_input:
+                        break
+                except:
+                    continue
+
             if phone_input:
                 await phone_input.click()
                 await page.wait_for_timeout(500)
                 await phone_input.fill(clean_num)
                 await page.wait_for_timeout(1000)
 
-                # সাবমিট বা ওটিপি সেন্ড বাটনে ক্লিক
-                submit_btn = await page.query_selector('button:has-text("OTP"), button:has-text("Send"), button[type="submit"], input[type="submit"]')
+                # সাবমিট বা ওটিপি সেন্ড বাটন খোঁজা
+                submit_btn = None
+                btn_selectors = ['button:has-text("OTP")', 'button:has-text("Send")', 'button:has-text("Continue")', 'button[type="submit"]', 'input[type="submit"]']
+                
+                for bsel in btn_selectors:
+                    try:
+                        submit_btn = await page.query_selector(bsel)
+                        if submit_btn:
+                            break
+                    except:
+                        continue
+
                 if submit_btn:
                     await submit_btn.click()
                     await page.wait_for_timeout(3000)
+                    log(f"✅ Successfully sent request for {number}")
                     await browser.close()
                     return True
 
+            log(f"⚠️ Input or Submit button not found on page for {number}")
             await browser.close()
             return False
 
